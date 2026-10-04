@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>3D Hand Tracking</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:#0b1220;color:#e2e8f0;font:14px system-ui,sans-serif;user-select:none;-webkit-user-select:none}
+body{display:flex;flex-direction:column;height:100dvh}
+header{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between;padding:10px 20px;background:#0f172a;border-bottom:1px solid #1e293b;z-index:20}
+h1{margin:0;font-size:17px}
+.sub{font-size:12px;color:#94a3b8}
+#badges,#bar{display:flex;gap:8px;align-items:center}
+.pill{padding:4px 12px;border-radius:99px;font-size:12px;background:#1e293b;color:#94a3b8;border:1px solid #334155;white-space:nowrap}
+.pill.a0{background:#0ea5e955;border-color:#0ea5e9;color:#7dd3fc}
+.pill.a1{background:#a855f755;border-color:#a855f7;color:#d8b4fe}
+.pill.ok{background:#10b98133;border-color:#10b981;color:#6ee7b7}
+.pill.bad{background:#ef444433;border-color:#ef4444;color:#fca5a5}
+button{font:inherit;font-weight:600;color:#fff;background:#4f46e5;border:0;border-radius:10px;padding:8px 16px;cursor:pointer}
+button:hover{background:#6366f1}
+button.alt{background:#0f766e}button.alt:hover{background:#14b8a6}
+main{flex:1;display:flex;min-height:0;position:relative}
+.panel{position:relative;width:50%;height:100%;background:#020617;overflow:hidden}
+#camPanel{border-right:1px solid #1e293b}
+#output{width:100%;height:100%;object-fit:cover}
+video{display:none}
+.tag{position:absolute;top:12px;left:12px;z-index:5;background:#0f172acc;border:1px solid #334155;border-radius:8px;padding:6px 10px;font-size:12px;pointer-events:none;line-height:1.5}
+.tag b{color:#34d399}
+#overlay{position:absolute;inset:0;z-index:50;background:#0f172ae6;display:none;align-items:center;justify-content:center;padding:16px}
+#overlay.on{display:flex}
+.card{background:#1e293b;border:1px solid #334155;border-radius:16px;padding:24px;max-width:380px;width:100%;text-align:center}
+.card h2{margin:0 0 8px}.card p{margin:0;color:#cbd5e1}
+.track{height:10px;background:#334155;border-radius:9px;overflow:hidden;margin:18px 0 8px}
+#prog{height:100%;width:0;background:#6366f1}
+#hint{font-size:12px;color:#fbbf24;min-height:16px}
+#next{margin-top:14px;display:none}
+/* Phone layout */
+@media (max-width:767px),(pointer:coarse) and (max-height:520px){
+ header{padding:8px 12px}.sub{display:none}h1{font-size:15px}
+ #badges{gap:4px}.pill{padding:3px 8px;font-size:11px}
+ #bar{position:fixed;left:50%;bottom:max(14px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:30;background:#0f172ae6;padding:8px;border-radius:16px;border:1px solid #334155}
+ main{display:block}
+ #viewPanel{width:100%;height:100%}
+ #camPanel{position:absolute;top:10px;right:10px;width:32vw;max-width:170px;height:auto;aspect-ratio:3/4;z-index:10;border:2px solid #334155;border-radius:12px}
+ #camPanel .tag{display:none}
+ #viewPanel .tag{font-size:11px;max-width:58vw;padding:5px 8px;top:10px;left:10px}
+ #viewPanel .tag .x{display:none}
+}
+</style>
+</head>
+<body>
+<header>
+ <div><h1>3D Hand Tracking</h1><div class="sub">Two hands · X/Y/Z motion · pinch to grab, throw and stack blocks</div></div>
+ <div id="badges"><span id="h0" class="pill">Hand L: searching</span><span id="h1" class="pill">Hand R: searching</span><span id="status" class="pill">Starting…</span></div>
+ <div id="bar"><button id="flip" class="alt">Flip camera</button><button id="calib">Calibrate</button></div>
+</header>
+<main>
+ <div class="panel" id="camPanel"><div class="tag">2D camera</div><video id="video" autoplay playsinline muted></video><canvas id="output"></canvas></div>
+ <div class="panel" id="viewPanel"><div class="tag"><b>3D space</b><br>Pinch thumb + index to grab<span class="x"><br>Move closer or farther to change depth<br>Drag the background to rotate</span></div></div>
+ <div id="overlay"><div class="card"><h2 id="ctitle"></h2><p id="cinst"></p><div class="track"><div id="prog"></div></div><div id="hint"></div><button id="next">Next</button></div></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const video=$('video'),canvas=$('output'),ctx=canvas.getContext('2d'),view=$('viewPanel'),statusEl=$('status');
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const isMobile=navigator.maxTouchPoints>0&&matchMedia('(pointer:coarse)').matches;
+const CONN=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
+function setStatus(t,c){statusEl.textContent=t;statusEl.className='pill '+(c||'')}
+
+/* ---------- Camera (front/back on phone, device cycling on PC) ---------- */
+let stream=null,facing='user',devices=[],di=0,mirror=true;
+async function startCam(){
+ if(!navigator.mediaDevices){setStatus('Needs HTTPS or localhost','bad');return}
+ if(stream)stream.getTracks().forEach(t=>t.stop());
+ const base={width:{ideal:1280},height:{ideal:720}};
+ const pick=isMobile?{facingMode:{ideal:facing}}:(devices[di]?{deviceId:{exact:devices[di].deviceId}}:{});
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({video:{...base,...pick},audio:false});
+  video.srcObject=stream;await video.play();
+  const s=stream.getVideoTracks()[0].getSettings();
+  mirror=isMobile?(s.facingMode?s.facingMode==='user':facing==='user'):true;
+  canvas.style.transform=mirror?'scaleX(-1)':'none';
+  devices=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');
+  di=Math.max(0,devices.findIndex(d=>d.deviceId===s.deviceId));
+  $('flip').style.display=(isMobile||devices.length>1)?'':'none';
+  setStatus('Tracking on','ok');
+ }catch(e){console.error(e);setStatus('Camera blocked','bad')}
+}
+$('flip').onclick=()=>{if(isMobile)facing=facing==='user'?'environment':'user';else di=(di+1)%devices.length;startCam()};
+
+/* ---------- Calibration (scale, X range and Y range) ---------- */
+const def={minS:.1,maxS:.35,minX:.2,maxX:.8,minY:.2,maxY:.8};
+let prof={...def},step=0,frames=0,tmp,calibOn=false;const N=35;
+function beginStep(){
+ frames=0;tmp={maxS:0,minS:9,minX:9,maxX:-9,minY:9,maxY:-9};$('prog').style.width='0';$('next').style.display='none';
+ $('next').textContent='Next';$('hint').style.color='#fbbf24';
+ const t=[['Step 1: move closer','Hold one hand close to the camera.'],['Step 2: move farther','Push your hand far from the camera.'],['Step 3: sweep the view','Move one hand to every edge and corner of the camera view.']][step];
+ $('ctitle').textContent=t[0];$('cinst').textContent=t[1];$('hint').textContent='Show one hand';
+}
+$('calib').onclick=()=>{prof={...def};step=0;calibOn=true;beginStep();$('overlay').classList.add('on')};
+$('next').onclick=()=>{if(++step<=2)beginStep();else{calibOn=false;$('overlay').classList.remove('on')}};
+function calibFrame(w,s){
+ if(frames>=N)return;
+ frames++;$('prog').style.width=frames/N*100+'%';
+ tmp.maxS=Math.max(tmp.maxS,s);tmp.minS=Math.min(tmp.minS,s);
+ tmp.minX=Math.min(tmp.minX,w.x);tmp.maxX=Math.max(tmp.maxX,w.x);tmp.minY=Math.min(tmp.minY,w.y);tmp.maxY=Math.max(tmp.maxY,w.y);
+ $('hint').textContent=`Recording ${frames}/${N}`;
+ if(frames<N)return;
+ if(step===0)prof.maxS=tmp.maxS;
+ if(step===1)prof.minS=tmp.minS;
+ if(step===2){
+  if(tmp.maxX-tmp.minX>.15){prof.minX=tmp.minX;prof.maxX=tmp.maxX}
+  if(tmp.maxY-tmp.minY>.15){prof.minY=tmp.minY;prof.maxY=tmp.maxY}
+ }
+ if(prof.maxS-prof.minS<.04){prof.minS=def.minS;prof.maxS=def.maxS}
+ $('hint').style.color='#34d399';$('hint').textContent=step<2?'Done. Tap Next.':'All done.';
+ if(step===2)$('next').textContent='Start';
+ $('next').style.display='inline-block';
+}
+
+/* ---------- 3D scene ---------- */
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x030712);scene.fog=new THREE.FogExp2(0x030712,.02);
+const cam3=new THREE.PerspectiveCamera(50,1,.1,1000);cam3.position.set(0,8,28);
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+view.appendChild(renderer.domElement);
+const controls=new THREE.OrbitControls(cam3,renderer.domElement);controls.enableDamping=true;controls.dampingFactor=.05;controls.maxPolarAngle=Math.PI/2+.05;
+scene.add(new THREE.AmbientLight(0xffffff,.6));
+const sun=new THREE.DirectionalLight(0xffffff,.9);sun.position.set(15,25,15);sun.castShadow=true;sun.shadow.mapSize.set(2048,2048);
+Object.assign(sun.shadow.camera,{left:-30,right:30,top:30,bottom:-30});scene.add(sun);
+const floorY=-4;
+const grid=new THREE.GridHelper(36,36,0x3b82f6,0x1e293b);grid.position.y=floorY;scene.add(grid);
+const sh=new THREE.Mesh(new THREE.PlaneGeometry(60,60),new THREE.ShadowMaterial({opacity:.4}));sh.rotation.x=-Math.PI/2;sh.position.y=floorY;sh.receiveShadow=true;scene.add(sh);
+function resize(){const w=view.clientWidth,h=view.clientHeight;if(!w||!h)return;renderer.setSize(w,h);cam3.aspect=w/h;cam3.position.z=w/h<.8?38:28;cam3.updateProjectionMatrix()}
+new ResizeObserver(resize).observe(view);resize();
+
+const blocks=[],colors=[0xef4444,0x3b82f6,0x10b981,0xf59e0b,0x8b5cf6,0xec4899,0x06b6d4,0x84cc16];
+for(let i=0;i<8;i++){
+ const s=1.4+Math.random()*.8;
+ const m=new THREE.Mesh(new THREE.BoxGeometry(s,s,s),new THREE.MeshStandardMaterial({color:colors[i],roughness:.3,metalness:.1}));
+ m.position.set((Math.random()-.5)*18,floorY+s/2,(Math.random()-.5)*12);m.castShadow=m.receiveShadow=true;scene.add(m);
+ blocks.push({mesh:m,size:s,by:-1,v:new THREE.Vector3(),prev:new THREE.Vector3()});
+}
+
+function makeHand(jc,bc){
+ const g=new THREE.Group(),geo=new THREE.SphereGeometry(.35,16,16),mat=new THREE.MeshStandardMaterial({color:jc,roughness:.2,metalness:.3,emissive:jc,emissiveIntensity:.25});
+ const joints=[];
+ for(let i=0;i<21;i++){const m=new THREE.Mesh(geo,mat);m.position.set(0,-100,0);m.castShadow=true;g.add(m);joints.push({mesh:m,target:new THREE.Vector3(0,-100,0)})}
+ const lg=new THREE.BufferGeometry();lg.setAttribute('position',new THREE.BufferAttribute(new Float32Array(CONN.length*6),3));
+ const lines=new THREE.LineSegments(lg,new THREE.LineBasicMaterial({color:0xcbd5e1}));lines.frustumCulled=false;g.add(lines);
+ const bg=new THREE.BufferGeometry();bg.setAttribute('position',new THREE.BufferAttribute(new Float32Array(6),3));
+ const beam=new THREE.Line(bg,new THREE.LineBasicMaterial({color:bc}));beam.frustumCulled=false;beam.visible=false;g.add(beam);
+ scene.add(g);
+ return{joints,lines,beam,visible:false,was:false,pinch:false};
+}
+const hands3D=[makeHand(0x38bdf8,0x00ffff),makeHand(0xc084fc,0xff00ff)];
+
+function updateLines(h){
+ const p=h.lines.geometry.attributes.position.array;let k=0;
+ for(const[a,b]of CONN){const A=h.joints[a].mesh.position,B=h.joints[b].mesh.position;p[k++]=A.x;p[k++]=A.y;p[k++]=A.z;p[k++]=B.x;p[k++]=B.y;p[k++]=B.z}
+ h.lines.geometry.attributes.position.needsUpdate=true;
+ h.beam.visible=h.pinch;
+ if(h.pinch){const T=h.joints[4].mesh.position,I=h.joints[8].mesh.position,q=h.beam.geometry.attributes.position.array;
+  q[0]=T.x;q[1]=T.y;q[2]=T.z;q[3]=I.x;q[4]=I.y;q[5]=I.z;h.beam.geometry.attributes.position.needsUpdate=true}
+}
+function release(i){for(const b of blocks)if(b.by===i)b.by=-1}
+
+function physics(){
+ hands3D.forEach((h,i)=>{
+  if(!h.visible){h.pinch=false;release(i);return}
+  const T=h.joints[4].mesh.position,I=h.joints[8].mesh.position;
+  h.pinch=T.distanceTo(I)<(h.pinch?2.9:2.2);
+  if(!h.pinch){release(i);return}
+  const c=T.clone().add(I).multiplyScalar(.5);
+  let b=blocks.find(k=>k.by===i);
+  if(!b){let m=3.5;for(const k of blocks)if(k.by<0){const d=k.mesh.position.distanceTo(c);if(d<m){m=d;b=k}}if(b)b.by=i}
+  if(b){const p=b.mesh.position;b.prev.copy(p);p.lerp(c,.35);b.v.copy(p).sub(b.prev).clampLength(0,1.5)}
+ });
+ for(const b of blocks){
+  if(b.by>=0)continue;
+  const p=b.mesh.position,s=b.size;let sup=floorY;
+  for(const o of blocks){
+   if(o===b)continue;
+   const q=o.mesh.position,r=(s+o.size)/2,dx=p.x-q.x,dz=p.z-q.z,dy=p.y-q.y;
+   if(Math.abs(dx)>=r||Math.abs(dz)>=r)continue;
+   if(dy>0&&p.y-s/2>=q.y+o.size/2-.6){sup=Math.max(sup,q.y+o.size/2)}
+   else if(Math.abs(dy)<r-.1&&o.by<0){
+    const px=r-Math.abs(dx),pz=r-Math.abs(dz);
+    if(px<pz){const m=Math.sign(dx||1)*px/2;p.x+=m;q.x-=m}else{const m=Math.sign(dz||1)*pz/2;p.z+=m;q.z-=m}
+   }
+  }
+  const rest=sup+s/2;
+  b.v.y-=.03;p.add(b.v);
+  if(p.y<=rest){p.y=rest;b.v.y=b.v.y<-.25?-b.v.y*.25:0;b.v.x*=.9;b.v.z*=.9}else{b.v.x*=.995;b.v.z*=.995}
+  p.x=clamp(p.x,-17,17);p.z=clamp(p.z,-14,14);
+ }
+}
+
+function animate(){
+ requestAnimationFrame(animate);
+ for(const h of hands3D){
+  if(h.visible){
+   for(const j of h.joints){if(!h.was)j.mesh.position.copy(j.target);else j.mesh.position.lerp(j.target,.35)}
+   updateLines(h);
+  }else for(const j of h.joints)j.mesh.position.set(0,-100,0);
+  h.was=h.visible;
+ }
+ physics();controls.update();renderer.render(scene,cam3);
+}
+animate();
+
+/* ---------- Tracking ---------- */
+const badge=[$('h0'),$('h1')],names=['Hand L','Hand R'];
+function onResults(r){
+ if(canvas.width!==video.videoWidth&&video.videoWidth){canvas.width=video.videoWidth;canvas.height=video.videoHeight}
+ ctx.save();ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(r.image,0,0,canvas.width,canvas.height);
+ hands3D.forEach(h=>h.visible=false);
+ const n=r.multiHandLandmarks?r.multiHandLandmarks.length:0,used=[false,false];
+ const sx=mirror?-1:1;
+ for(let i=0;i<Math.min(n,2);i++){
+  const lm=r.multiHandLandmarks[i],wl=r.multiHandWorldLandmarks&&r.multiHandWorldLandmarks[i];
+  const lab=r.multiHandedness&&r.multiHandedness[i]&&r.multiHandedness[i].label;
+  let s=lab==='Left'?0:1;if(used[s])s=1-s;used[s]=true;
+  const w=lm[0],m=lm[9],scale=Math.hypot(m.x-w.x,m.y-w.y);
+  drawConnectors(ctx,lm,CONN,{color:s?'#c084fc':'#38bdf8',lineWidth:3});
+  drawLandmarks(ctx,lm,{color:'#fff',lineWidth:1,radius:3});
+  if(calibOn){if(n===1)calibFrame(w,scale);continue}
+  if(!wl)continue;
+  const h=hands3D[s];h.visible=true;
+  const nz=(scale-prof.minS)/Math.max(.05,prof.maxS-prof.minS);
+  const nx=clamp((w.x-prof.minX)/Math.max(.1,prof.maxX-prof.minX),0,1);
+  const ny=clamp((w.y-prof.minY)/Math.max(.1,prof.maxY-prof.minY),0,1);
+  const rz=clamp((nz-.5)*25,-18,12),rx=sx*(nx-.5)*32,ry=Math.max(floorY+1,(.5-ny)*22+5),L=30;
+  for(let j=0;j<21;j++)h.joints[j].target.set(rx+sx*wl[j].x*L,ry-wl[j].y*L,rz-wl[j].z*L);
+ }
+ if(calibOn&&n!==1){$('hint').style.color='#fbbf24';$('hint').textContent='Show exactly one hand'}
+ ctx.restore();
+ for(let k=0;k<2;k++){badge[k].textContent=`${names[k]}: ${used[k]?'active':'searching'}`;badge[k].className='pill'+(used[k]?' a'+k:'')}
+}
+const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+hands.setOptions({maxNumHands:2,modelComplexity:1,minDetectionConfidence:.6,minTrackingConfidence:.6});
+hands.onResults(onResults);
+let busy=false;
+async function loop(){
+ if(video.readyState>=2&&!busy){busy=true;try{await hands.send({image:video})}catch(e){}busy=false}
+ requestAnimationFrame(loop);
+}
+startCam().then(loop);
+</script>
+</body>
+</html>
